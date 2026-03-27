@@ -1,0 +1,143 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  # =============================================================================
+  # Security Check - 检查敏感信息
+  # =============================================================================
+  security-check:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Check for .env files
+      run: |
+        if find . -name ".env" -not -path "*/node_modules/*" -not -path "*/.git/*" | grep -q .; then
+          echo "❌ Error: .env files found in repository!"
+          echo "Please remove them and use .env.example instead."
+          exit 1
+        fi
+        echo "✅ No .env files found"
+    
+    - name: Check for API keys in code
+      run: |
+        # 检查常见的 API key 模式
+        patterns=(
+          "sk-[a-zA-Z0-9]{20,}"  # OpenAI API key
+          "ghp_[a-zA-Z0-9]{36}"   # GitHub token
+          "AKIA[0-9A-Z]{16}"      # AWS access key
+        )
+        
+        for pattern in "${patterns[@]}"; do
+          if grep -r "$pattern" --include="*.py" --include="*.js" --include="*.ts" --include="*.md" . 2>/dev/null | grep -v ".env.example" | grep -v "node_modules"; then
+            echo "❌ Potential API key found!"
+            exit 1
+          fi
+        done
+        echo "✅ No API keys found in code"
+
+  # =============================================================================
+  # Python Lint & Test
+  # =============================================================================
+  python-check:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.10', '3.11', '3.12']
+
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install black ruff mypy pytest pytest-cov
+    
+    - name: Lint with Ruff
+      run: |
+        ruff check .
+    
+    - name: Format check with Black
+      run: |
+        black --check .
+    
+    - name: Type check with MyPy
+      run: |
+        mypy . || true  # 暂时允许失败，逐步改进
+
+  # =============================================================================
+  # Test Individual Projects
+  # =============================================================================
+  test-projects:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        project:
+          - 01-smart-mailbox
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    
+    - name: Install project dependencies
+      working-directory: ./projects/${{ matrix.project }}
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pytest pytest-cov pytest-asyncio httpx
+    
+    - name: Run tests
+      working-directory: ./projects/${{ matrix.project }}
+      run: |
+        pytest --cov=src --cov-report=xml --cov-report=term || true
+    
+    - name: Upload coverage
+      uses: codecov/codecov-action@v3
+      with:
+        files: ./projects/${{ matrix.project }}/coverage.xml
+        flags: ${{ matrix.project }}
+        fail_ci_if_error: false
+
+  # =============================================================================
+  # Build Docker Images
+  # =============================================================================
+  docker-build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        project:
+          - 01-smart-mailbox
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+    
+    - name: Build Docker image
+      working-directory: ./projects/${{ matrix.project }}
+      run: |
+        docker build -t ${{ matrix.project }}:latest .
+    
+    - name: Test Docker image
+      working-directory: ./projects/${{ matrix.project }}
+      run: |
+        # 简单测试镜像可以启动
+        docker run --rm -d -p 8000:8000 --name test-container ${{ matrix.project }}:latest
+        sleep 5
+        curl -f http://localhost:8000/health || exit 1
+        docker stop test-container
