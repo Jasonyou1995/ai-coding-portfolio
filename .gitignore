@@ -3,6 +3,9 @@
 # 🔴 绝对保护 - 凭证与密钥
 # =============================================================================
 
+# Discard any prompts
+**/*.prompt
+
 # Environment variables and secrets
 .env
 .env.local
