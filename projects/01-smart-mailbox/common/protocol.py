@@ -42,8 +42,9 @@ class AckPayload(TypedDict):
 HELLO = "HELLO"
 RELAY_MAIL = "RELAY_MAIL"
 ACK = "ACK"
+FETCH_INBOX = "FETCH_INBOX"
 
-KNOWN_TYPES = {HELLO, RELAY_MAIL, ACK}
+KNOWN_TYPES = {HELLO, RELAY_MAIL, ACK, FETCH_INBOX}
 
 REQUIRED_FIELDS = ("type", "msg_id", "ts", "payload")
 
