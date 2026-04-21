@@ -42,7 +42,8 @@ dev = [
 ]
 
 [tool.setuptools.packages.find]
-where = ["src"]
+where = ["."]
+exclude = ["tests*", ".venv*", "docs*", "scripts*", ".pytest_cache*"]
 
 [tool.black]
 line-length = 100
