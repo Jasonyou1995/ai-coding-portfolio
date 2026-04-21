@@ -1,26 +1,16 @@
 # Design Decisions (ADRs)
 
-## ADR-001: Language Choice
-- **Context**: Need for rapid development with strong standard libraries and modern security features.
-- **Decision**: Python 3.11+.
-- **Consequences**: Easy access to modern crypto primitives and type hinting for safety.
+## ADR-001: Custom JSON over TLS instead of SMTP
+We chose a lightweight custom JSON-over-TLS protocol instead of SMTP because the specification explicitly forbids mature email libraries, and SMTP’s complexity—MIME encoding, multipart boundaries, 7-bit transfer encoding, and decades of RFC edge cases—would introduce unnecessary attack surface for a pedagogical system. By defining a strict JSON schema for envelope and body fields, we can enforce canonical serialization, simplify cryptographic signing, and perform precise server-side validation without parsing legacy SMTP grammar. All inter-server and client-server traffic is tunneled through mutual-TLS (mTLS) channels with pinned self-signed certificates, ensuring confidentiality and authentication without relying on the global PKI. The trade-off is that we lose interoperability with standard email providers and must implement our own anti-spoofing and replay protections, but this is acceptable given the closed-domain federation requirement.
 
-## ADR-002: Transport Layer
-- **Context**: The specification forbids mature email libraries.
-- **Decision**: Raw TCP sockets wrapped in TLS.
-- **Consequences**: Requires custom protocol implementation but ensures full control over security handshake.
+## ADR-002: SQLite per Server for Data Isolation
+To satisfy the requirement that two simultaneously running servers must remain logically isolated, we deploy one independent SQLite database file per server instance, stored in a dedicated host directory with strict filesystem permissions (`0700`). This approach eliminates the risk of cross-tenant SQL injection or misconfigured schema access controls that could arise from a shared-database multi-tenant design, and it allows each domain to be backed up, migrated, or wiped independently. SQLite’s single-writer concurrency model is sufficient for the expected workload of a demonstration system, and its zero-configuration nature simplifies the dual-domain test setup. The primary consequence is that horizontal scaling within a single domain is not supported, and administrators must rely on filesystem-level access controls rather than database GRANT statements to enforce isolation.
 
-## ADR-003: Storage Strategy
-- **Context**: Requirement for logical isolation between server instances.
-- **Decision**: SQLite (one separate file per server instance).
-- **Consequences**: High performance for single-user scenarios and easy backup/isolation via file system.
+## ADR-003: Password Storage with Argon2id
+We selected Argon2id as the password hashing algorithm with a memory cost of 64 MB, three iterations, and four parallel lanes, using the Python `argon2-cffi` binding. Argon2id is the winner of the Password Hashing Competition and is recommended by OWASP over bcrypt and scrypt because it provides strong resistance against both GPU-based offline cracking (via memory hardness) and side-channel attacks (via the hybrid data-independent/data-dependent memory access pattern of the "id" variant). Unlike bcrypt, which truncates passwords at 72 bytes and lacks memory hardness, Argon2id allows configurable memory and parallelism parameters that we can scale with future hardware. Password hashes are stored as modular crypt format strings containing the salt and parameters, so verification does not require a separate salt lookup. The residual trade-off is that Argon2id’s memory requirements may slightly increase peak RAM usage during concurrent logins, but this is mitigated by our rate-limiting layer.
 
-## ADR-004: Cryptography Library
-- **Context**: Need to implement security protocols from scratch using vetted primitives.
-- **Decision**: `cryptography` library (primitives only).
-- **Consequences**: Prevents "reinventing the wheel" for basic ciphers while allowing custom higher-level protocol design.
+## ADR-004: Session Security after Login (Token + HMAC with Refresh Rotation)
+After successful password verification, the server issues a short-lived access token (15-minute expiry) and a longer-lived refresh token (7-day expiry), both generated from `secrets.token_urlsafe(32)`. The access token is stateless: it consists of a random payload concatenated with an HMAC-SHA256 tag keyed by a server-side secret, allowing the server to validate it without database lookups. The refresh token is stored in a hashed form (`SHA-256` of the token value) in the database alongside a device fingerprint (client hostname hash + OS username hash) and is rotated on every use to prevent replay. Clients must present the valid access token in a custom `X-Session-Token` header for all subsequent requests; any token mismatch or fingerprint deviation triggers immediate revocation of the entire token family. This design balances performance (stateless validation for hot paths) with security (short window of compromise, binding to device context), though a full server-side token revocation list would be needed if we later require instant global logout.
 
-## ADR-005: User Interface
-- **Context**: Priority is on the security skeleton rather than web presentation.
-- **Decision**: Command Line Interface (CLI) client.
-- **Consequences**: Faster development of core functionality and easier testing/automation.
+## ADR-005: Attachment Storage Strategy (Keyed Deduplication + Encryption at Rest)
+Attachments are stored in a two-layer scheme: deduplication is performed using a keyed content hash (`HMAC-SHA256` of the file bytes with a server-side secret) to prevent timing-based existence leaks, while the actual bytes are encrypted at rest with AES-256-GCM using a per-user key derived from the user’s password via Argon2id. When an attachment arrives, the server computes the keyed hash; if the ciphertext blob already exists, it creates a new reference link rather than duplicating storage. Each reference record includes the nonce and authentication tag required for decryption by the owning user. This strategy satisfies the spec’s dual requirement for storage optimization and file security: identical attachments across different users do not consume extra disk space, yet no user can decrypt another user’s linked copy without knowing the respective password. The trade-off is that password resets require re-encrypting all user attachments with a new key, which we handle via a background migration task triggered after a successful password change.
